@@ -1,8 +1,8 @@
 # Shopify Sync Actions
 
-![](https://img.shields.io/github/package-json/v/gabrielecanepa/shopify-sync-actions?style=flat)
-[![](https://github.com/gabrielecanepa/shopify-sync-actions/actions/workflows/sync-collections.yml/badge.svg)](https://github.com/gabrielecanepa/shopify-sync-actions/actions/workflows/sync-collections.yml)
-[![](https://github.com/gabrielecanepa/shopify-sync-actions/actions/workflows/sync-products.yml/badge.svg)](https://github.com/gabrielecanepa/shopify-sync-actions/actions/workflows/sync-products.yml)
+![](https://img.shields.io/github/package-json/v/guello/shopify-sync-actions?style=flat)
+[![](https://github.com/guello/shopify-sync-actions/actions/workflows/sync-collections.yml/badge.svg)](https://github.com/guello/shopify-sync-actions/actions/workflows/sync-collections.yml)
+[![](https://github.com/guello/shopify-sync-actions/actions/workflows/sync-products.yml/badge.svg)](https://github.com/guello/shopify-sync-actions/actions/workflows/sync-products.yml)
 
 Actions to synchronize data between Shopify stores and external services.
 
@@ -11,7 +11,7 @@ Actions to synchronize data between Shopify stores and external services.
 Download the repository and install the dependencies:
 
 ```sh
-git clone git@github.com:gabrielecanepa/shopify-sync-actions.git
+git clone git@github.com:guello/shopify-sync-actions.git
 cd shopify-sync-actions
 pnpm install
 ```
