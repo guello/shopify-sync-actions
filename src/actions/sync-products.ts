@@ -77,7 +77,7 @@ export const syncProducts: Action = async ({ event, retries, runId }) => {
         status: ActionStatus.failed,
         message: 'No product variants found',
       })
-      if (isLastRetry) break
+      if (isLastRetry) throw new Error('No product variants found after retries')
       continue
     }
 
@@ -106,9 +106,12 @@ export const syncProducts: Action = async ({ event, retries, runId }) => {
       [] as AdjustQuantitiesInput['changes']
     )
 
-    const { data: changedData } = await shopify.fetchProductVariants<Variant>({
+    if (!updates.length) continue
+
+    const { data: changedData, errors: changedErrors } = await shopify.fetchProductVariants<Variant>({
       ids: variantChanges.map(({ variant }) => variant.id),
     })
+    if (changedErrors || !changedData?.productVariants) throw new Error('Could not verify product variants')
     const changedVariants = changedData?.productVariants?.edges || []
 
     const changes = updates.filter(({ inventoryItemId }) => {
@@ -117,19 +120,29 @@ export const syncProducts: Action = async ({ event, retries, runId }) => {
       return variantChange?.quantities[0] === changedVariant?.node.inventoryQuantity
     })
 
-    const input = { ...BASE_INPUT, changes }
-    const { data: adjustData, errors } = await shopify.adjustQuantities({ input })
+    const skipped = updates.length - changes.length
+    if (skipped) logger.warning(`Skipped ${skipped} ${pluralize('variant', skipped)} changed during sync`)
+    if (!changes.length) continue
 
-    if (!adjustData || errors) {
-      if (errors && !isThrottled(errors)) {
+    const input = { ...BASE_INPUT, changes }
+    const { data: adjustData, errors } = await shopify.adjustQuantities({
+      input,
+    })
+
+    if (
+      !adjustData?.inventoryAdjustQuantities?.inventoryAdjustmentGroup ||
+      errors ||
+      adjustData.inventoryAdjustQuantities.userErrors?.length
+    ) {
+      if (!errors || !isThrottled(errors)) {
         await sheets.logProducts({
           ...baseLog,
           status: ActionStatus.failed,
-          errors,
+          errors: errors || adjustData?.inventoryAdjustQuantities?.userErrors,
           message: 'Shopify API error',
         })
       }
-      if (isLastRetry) break
+      if (isLastRetry) throw new Error('Shopify API error after retries')
       continue
     }
 

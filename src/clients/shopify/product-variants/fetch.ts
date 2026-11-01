@@ -1,5 +1,5 @@
 import { client, RESOURCES_LIMIT } from '@/clients/shopify'
-import { logger, resolveEdges, toID } from '@/utils'
+import { resolveEdges, toID } from '@/utils'
 
 import type { ClientResponse, ProductVariant } from '@/clients/shopify'
 
@@ -139,17 +139,15 @@ export const fetchAllProductVariants = async <T extends ProductVariant = Product
   limit,
 }: FetchProductVariantsRequestOptions = {}): Promise<FetchProductVariantsResponse<T>> => {
   const edges: T[] = []
-  const errors = []
-
   while (true) {
-    const { data, errors: error } = await fetchProductVariants<T>({ cursor, fields, limit })
+    const { data, errors: error } = await fetchProductVariants<T>({
+      cursor,
+      fields,
+      limit,
+    })
 
     if (!data?.productVariants) {
-      if (error) {
-        errors.push(error as any)
-        logger.error(error)
-      }
-      continue
+      throw new Error(`Could not fetch product variants: ${JSON.stringify(error || 'empty response')}`)
     }
 
     const { edges: variantEdges, pageInfo } = data.productVariants
@@ -162,6 +160,5 @@ export const fetchAllProductVariants = async <T extends ProductVariant = Product
 
   return {
     data: { productVariants: { edges } },
-    errors,
   }
 }

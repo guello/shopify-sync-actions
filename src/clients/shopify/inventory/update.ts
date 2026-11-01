@@ -24,6 +24,7 @@ export interface AdjustQuantitiesRequestOptions {
  */
 export interface AdjustQuantitiesResponse {
   inventoryAdjustQuantities: {
+    userErrors: { field: string[]; message: string }[]
     inventoryAdjustmentGroup: {
       createdAt: string
       reason: string
@@ -42,6 +43,10 @@ export interface AdjustQuantitiesResponse {
 const operation = `
   mutation inventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
     inventoryAdjustQuantities(input: $input) {
+      userErrors {
+        field
+        message
+      }
       inventoryAdjustmentGroup {
         createdAt
         reason
@@ -59,4 +64,6 @@ const operation = `
 `
 
 export const adjustQuantities = async ({ input }: AdjustQuantitiesRequestOptions) =>
-  await client.request<AdjustQuantitiesResponse>(operation, { variables: { input } })
+  await client.request<AdjustQuantitiesResponse>(operation, {
+    variables: { input },
+  })

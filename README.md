@@ -28,6 +28,12 @@ pnpm run action <workflow-name>
 
 Each action has a corresponding workflow in the `.github/workflows` that runs every 5 minutes[\*](#run-workflows-in-shorter-intervals) and can be triggered manually from the repository's Actions tab.
 
+### Failure alerts
+
+The [Monitor Sync](.github/workflows/monitor-sync.yml) workflow checks each completed run and fails after consecutive unsuccessful runs of the same workflow; a successful run resets the count. The threshold defaults to 3. To change it, set the repository Actions variable `SYNC_FAILURE_THRESHOLD` to an integer from 1 to 100 under Settings > Secrets and variables > Actions > Variables. Invalid values fail the monitor rather than disabling alerts. Sync job errors remain visible in their run logs, but are tolerated at the job level so a single transient error does not fail the sync workflow. Failures of the monitor workflow trigger GitHub Actions failure notifications when you have enabled them in your GitHub notification settings. Persistent failures continue to alert on subsequent runs.
+
+The monitor also checks every 15 minutes that each sync workflow has started and completed a run within the last 30 minutes. It fails if a workflow stops starting or its runs stop completing. A manual run of Monitor Sync performs this same check. If GitHub Actions itself stops running schedules, this check cannot execute; use an independent external heartbeat monitor if missed schedules must be reported even during a GitHub Actions outage.
+
 ### Sync Collections Status
 
 The action synchronizes the publications of a Shopify collection depending on a given metafield and logs the operations in a Google Sheets spreadsheet.

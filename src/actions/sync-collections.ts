@@ -81,6 +81,7 @@ const updateCollections = async (
 ): Promise<boolean> => {
   const actions = Object.keys(args) as PublishAction[]
   const updatedCollections = []
+  let failed = false
 
   for (const action of actions) {
     const actionTitle = titleize(action)
@@ -93,7 +94,11 @@ const updateCollections = async (
 
     for (const collection of collections) {
       const { id, title } = collection
-      const { collection: updated, userErrors } = await fn({ id, publications, fields })
+      const { collection: updated, userErrors } = await fn({
+        id,
+        publications,
+        fields,
+      })
       const logBody = {
         ...actionLog,
         action,
@@ -102,6 +107,7 @@ const updateCollections = async (
       }
 
       if (!updated) {
+        failed = true
         logger.error(`⚠︎ Failed: ${toID(id)} (${title})`)
         const errors = parseUserErrors(userErrors)
 
@@ -138,7 +144,7 @@ const updateCollections = async (
     logger.notice(`${actionTitle}ed ${updatedCollections.length} out of ${collections.length} collections`)
   }
   if (!updatedCollections.length) logger.notice('No changes')
-  return true
+  return !failed
 }
 
 /**
@@ -187,4 +193,5 @@ export const syncCollections: Action = async ({ event, retries, runId }) => {
       exit(null, 0)
     }
   }
+  throw new Error('Could not update collections after retries')
 }
