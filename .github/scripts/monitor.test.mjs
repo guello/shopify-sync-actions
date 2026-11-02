@@ -1,6 +1,9 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 import {
+  alertKeys,
+  annotate,
+  checkWorkflow,
   consecutiveFailures,
   failedSync,
   hasStoppedCompleting,
@@ -144,4 +147,44 @@ test('alerts if recent runs have not completed', () => {
     ),
     true
   )
+})
+
+test('reports the problem of an unhealthy workflow with a stable key', async () => {
+  const now = 100000000
+  const recent = new Date(now).toISOString()
+  const history = ['failure', 'failure', 'failure'].map((conclusion, id) => ({
+    id,
+    status: 'completed',
+    conclusion,
+    created_at: recent,
+    updated_at: recent,
+    html_url: `run-${id}`,
+  }))
+  assert.deepEqual(await checkWorkflow('sync-products.yml', history, async () => [], now, 3), {
+    key: 'sync-products.yml:failing',
+    message: 'sync-products.yml failed 3 consecutive runs: run-0',
+  })
+  assert.equal(await checkWorkflow('sync-products.yml', history, async () => [], now, 4), undefined)
+  assert.equal((await checkWorkflow('sync-products.yml', [], async () => [], now)).key, 'sync-products.yml:stale')
+})
+
+test('fails only for problems the previous monitor run did not report', () => {
+  const problems = [
+    { key: 'sync-products.yml:failing', message: 'products failed' },
+    { key: 'sync-collections.yml:stale', message: 'collections stale' },
+  ]
+  const reported = alertKeys([
+    { message: '[monitor:sync-products.yml:failing] products failed' },
+    { message: 'Process completed with exit code 1.' },
+  ])
+  assert.deepEqual([...reported], ['sync-products.yml:failing'])
+  assert.deepEqual(annotate(problems, reported), [
+    '::warning::[monitor:sync-products.yml:failing] products failed (already alerted)',
+    '::error::[monitor:sync-collections.yml:stale] collections stale',
+  ])
+})
+
+test('alerts again after a problem clears and returns', () => {
+  const problems = [{ key: 'sync-products.yml:failing', message: 'products failed' }]
+  assert.deepEqual(annotate(problems, alertKeys([])), ['::error::[monitor:sync-products.yml:failing] products failed'])
 })

@@ -9,6 +9,42 @@ export const parseFailureThreshold = value => {
 }
 export const failureThreshold = parseFailureThreshold(process.env.SYNC_FAILURE_THRESHOLD)
 export const staleAfterMs = 30 * 60 * 1000
+export const monitorWorkflow = 'monitor.yml'
+export const monitorJob = 'monitor'
+
+const alertTag = /\[monitor:([^\]]+)\]/
+
+/**
+ * Returns the problem of a sync workflow, or undefined when it is healthy.
+ */
+export const checkWorkflow = async (workflow, runs, getJobs, now = Date.now(), threshold = failureThreshold) => {
+  if (isStale(runs, now))
+    return { key: `${workflow}:stale`, message: `${workflow} has not started for at least 30 minutes` }
+  if (hasStoppedCompleting(runs, now))
+    return { key: `${workflow}:stopped`, message: `${workflow} has not completed for at least 30 minutes` }
+  const failures = await consecutiveFailures(runs, getJobs, threshold)
+  console.log(`${workflow}: ${failures} consecutive unsuccessful runs`)
+  if (failures < threshold) return
+  const latest = runs.find(run => run.status === 'completed')
+  return {
+    key: `${workflow}:failing`,
+    message: `${workflow} failed ${failures} consecutive runs: ${latest.html_url}`,
+  }
+}
+
+/**
+ * Reads the alert keys tagged in the annotations of a monitor run.
+ */
+export const alertKeys = annotations =>
+  new Set(annotations.map(({ message }) => message?.match(alertTag)?.[1]).filter(Boolean))
+
+/**
+ * Formats problems as annotations: new problems are errors, problems already reported by the previous run are warnings.
+ */
+export const annotate = (problems, reported) =>
+  problems.map(({ key, message }) =>
+    reported.has(key) ? `::warning::[monitor:${key}] ${message} (already alerted)` : `::error::[monitor:${key}] ${message}`
+  )
 
 export const failedSync = jobs =>
   jobs.some(job => {
@@ -46,7 +82,8 @@ export const loadRunHistory = async (getPage, threshold = failureThreshold) => {
   throw new Error('Cannot inspect enough completed workflow runs')
 }
 
-const { GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_EVENT_NAME, GITHUB_EVENT_PATH, GITHUB_REF_NAME } = process.env
+const { GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_EVENT_NAME, GITHUB_EVENT_PATH, GITHUB_REF_NAME, GITHUB_RUN_ID } =
+  process.env
 
 const api = async path => {
   const response = await fetch(`https://api.github.com/repos/${GITHUB_REPOSITORY}/${path}`, {
@@ -74,40 +111,40 @@ const jobsFor = async (id, attempt) => {
   return jobs
 }
 
+/**
+ * Finds the alert keys reported by the last monitor job that finished before this run.
+ */
+const reportedKeys = async () => {
+  const { workflow_runs: runs } = await api(
+    `actions/workflows/${monitorWorkflow}/runs?per_page=20&branch=${encodeURIComponent(GITHUB_REF_NAME)}`
+  )
+  for (const run of runs) {
+    if (String(run.id) === GITHUB_RUN_ID || run.status !== 'completed') continue
+    const job = (await jobsFor(run.id, run.run_attempt)).find(({ name }) => name === monitorJob)
+    if (!['success', 'failure'].includes(job?.conclusion)) continue
+    return alertKeys(await api(`check-runs/${job.id}/annotations?per_page=100`))
+  }
+  return new Set()
+}
+
 const main = async () => {
-  if (!GITHUB_TOKEN || !GITHUB_REPOSITORY || !GITHUB_EVENT_PATH || !GITHUB_REF_NAME)
+  if (!GITHUB_TOKEN || !GITHUB_REPOSITORY || !GITHUB_EVENT_PATH || !GITHUB_REF_NAME || !GITHUB_RUN_ID)
     throw new Error('Missing GitHub event credentials')
 
-  if (GITHUB_EVENT_NAME === 'schedule' || GITHUB_EVENT_NAME === 'workflow_dispatch') {
-    for (const workflow of workflows) {
-      const runs = await runsFor(workflow)
-      if (isStale(runs)) throw new Error(`${workflow} has not started for at least 30 minutes`)
-      if (hasStoppedCompleting(runs)) throw new Error(`${workflow} has not completed for at least 30 minutes`)
-      const failures = await consecutiveFailures(runs, jobsFor)
-      if (failures >= failureThreshold) throw new Error(`${workflow} has failed ${failures} consecutive runs`)
-      console.log(`${workflow}: ${failures} consecutive unsuccessful runs`)
-    }
-    return
+  if (GITHUB_EVENT_NAME === 'workflow_run') {
+    const { workflow_run: event } = JSON.parse(await readFile(GITHUB_EVENT_PATH, 'utf8'))
+    if (event.head_branch !== GITHUB_REF_NAME) return
   }
 
-  const { workflow_run: event } = JSON.parse(await readFile(GITHUB_EVENT_PATH, 'utf8'))
-  if (event.head_branch !== GITHUB_REF_NAME) return
-  const workflow = workflows.find(name => event.path?.includes(`.github/workflows/${name}`))
-  if (!workflow) throw new Error(`Unexpected workflow: ${event.path}`)
-
-  const history = await runsFor(workflow)
-  const latest = history.find(run => run.status === 'completed')
-  if (!latest) throw new Error(`Cannot find completed runs for ${workflow}`)
-  if (latest.id !== event.id || latest.run_attempt !== event.run_attempt) {
-    console.log(`Run ${event.id} was superseded by run ${latest.id}`)
-    return
+  const problems = []
+  for (const workflow of workflows) {
+    const problem = await checkWorkflow(workflow, await runsFor(workflow), jobsFor)
+    if (problem) problems.push(problem)
   }
 
-  const failures = await consecutiveFailures(history, jobsFor)
-  console.log(`${workflow}: ${failures} consecutive unsuccessful runs`)
-  if (failures >= failureThreshold) {
-    throw new Error(`${workflow} failed ${failures} consecutive runs: ${event.html_url}`)
-  }
+  const reported = await reportedKeys()
+  for (const line of annotate(problems, reported)) console.log(line)
+  if (problems.some(({ key }) => !reported.has(key))) process.exitCode = 1
 }
 
 if (process.argv[1]?.endsWith('monitor.mjs')) {
