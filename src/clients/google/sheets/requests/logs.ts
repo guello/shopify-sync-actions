@@ -61,10 +61,15 @@ export const appendActionLog = async <T extends BaseObject>(sheet: string, paylo
       Errors: errors,
     },
   ]
-  if (payload.message) logger[payload.status === ActionStatus.failed ? 'error' : 'notice'](payload.message)
+  if (payload.message)
+    logger[payload.status === ActionStatus.failed ? 'error' : 'notice'](payload.message, ...(hasErrors ? [errors] : []))
 
   try {
-    return await sheets.appendRows({ spreadsheetId: SPREADSHEET_ID, sheet, values })
+    return await sheets.appendRows({
+      spreadsheetId: SPREADSHEET_ID,
+      sheet,
+      values,
+    })
   } catch (error) {
     logger.warning(`Could not append the action log: ${error instanceof Error ? error.message : error}`)
   }

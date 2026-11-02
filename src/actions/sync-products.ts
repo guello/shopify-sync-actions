@@ -18,6 +18,15 @@ const BASE_INPUT = {
   name: 'available',
 }
 
+const inventoryLevelFields = (locationId: string) => `
+  inventoryItem {
+    inventoryLevel(locationId: "${locationId}") {
+      quantities(names: ["${BASE_INPUT.name}"]) {
+        quantity
+      }
+    }
+  }`
+
 interface Product extends ProductBase {
   onlineStoreUrl: string
   seo: {
@@ -30,7 +39,9 @@ interface Variant extends ProductVariant {
   displayName: string
   product: Product
   inventoryQuantity: number
-  inventoryItem: InventoryItem
+  inventoryItem: InventoryItem & {
+    inventoryLevel?: { quantities: { quantity: number }[] } | null
+  }
 }
 
 interface VariantChange {
@@ -103,26 +114,33 @@ export const syncProducts: Action = async ({ event, retries, runId }) => {
 
         return [...changes, { delta, inventoryItemId: inventoryItem.id, locationId }]
       },
-      [] as AdjustQuantitiesInput['changes']
+      [] as Omit<AdjustQuantitiesInput['changes'][number], 'changeFromQuantity'>[]
     )
 
-    if (!updates.length) continue
+    if (!updates.length) break
 
     const { data: changedData, errors: changedErrors } = await shopify.fetchProductVariants<Variant>({
       ids: variantChanges.map(({ variant }) => variant.id),
+      fields: inventoryLevelFields(locationId),
     })
     if (changedErrors || !changedData?.productVariants) throw new Error('Could not verify product variants')
     const changedVariants = changedData?.productVariants?.edges || []
 
-    const changes = updates.filter(({ inventoryItemId }) => {
-      const variantChange = variantChanges.find(({ variant }) => variant.inventoryItem.id === inventoryItemId)
-      const changedVariant = changedVariants.find(({ node }) => node.inventoryItem.id === inventoryItemId)
-      return variantChange?.quantities[0] === changedVariant?.node.inventoryQuantity
+    const changes = updates.flatMap(update => {
+      const variantChange = variantChanges.find(({ variant }) => variant.inventoryItem.id === update.inventoryItemId)
+      const changedVariant = changedVariants.find(({ node }) => node.inventoryItem.id === update.inventoryItemId)?.node
+      const changeFromQuantity = changedVariant?.inventoryItem.inventoryLevel?.quantities[0]?.quantity
+      if (changeFromQuantity === undefined || variantChange?.quantities[0] !== changedVariant?.inventoryQuantity)
+        return []
+      return [{ ...update, changeFromQuantity }]
     })
 
     const skipped = updates.length - changes.length
-    if (skipped) logger.warning(`Skipped ${skipped} ${pluralize('variant', skipped)} changed during sync`)
-    if (!changes.length) continue
+    if (skipped)
+      logger.warning(
+        `Skipped ${skipped} ${pluralize('variant', skipped)} changed during sync or not stocked at the location`
+      )
+    if (!changes.length) break
 
     const input = { ...BASE_INPUT, changes }
     const { data: adjustData, errors } = await shopify.adjustQuantities({
@@ -167,6 +185,7 @@ export const syncProducts: Action = async ({ event, retries, runId }) => {
       })
       updatesCount++
     }
+    break
   }
 
   logger.notice(
