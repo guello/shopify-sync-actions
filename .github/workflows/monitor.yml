@@ -38,6 +38,12 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v5
-      - uses: entepotenz/keep-github-actions-alive-min-dependencies@v1
-        with:
-          COMMIT_MESSAGE: 'chore(actions): automated commit'
+      - name: Commit if the repository is inactive
+        run: |
+          days=$(( ($(date +%s) - $(git log -1 --format=%ct)) / 86400 ))
+          echo "Last commit is $days days ago"
+          if [ "$days" -le 50 ]; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore(actions): automated commit"
+          git push
