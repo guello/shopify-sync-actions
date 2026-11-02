@@ -8,7 +8,7 @@ import {
   loadRunHistory,
   parseFailureThreshold,
   staleAfterMs,
-} from './monitor-sync.mjs'
+} from './monitor.mjs'
 
 const runs = (...conclusions) =>
   conclusions.map((conclusion, index) => ({

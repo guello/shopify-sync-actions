@@ -110,7 +110,7 @@ const main = async () => {
   }
 }
 
-if (process.argv[1]?.endsWith('monitor-sync.mjs')) {
+if (process.argv[1]?.endsWith('monitor.mjs')) {
   main().catch(error => {
     console.error(error)
     process.exitCode = 1
