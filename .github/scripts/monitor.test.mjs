@@ -10,7 +10,10 @@ import {
   isStale,
   loadRunHistory,
   parseFailureThreshold,
+  reportedKeys,
   staleAfterMs,
+  TransientError,
+  withRetries,
 } from './monitor.mjs'
 
 const runs = (...conclusions) =>
@@ -187,4 +190,68 @@ test('fails only for problems the previous monitor run did not report', () => {
 test('alerts again after a problem clears and returns', () => {
   const problems = [{ key: 'sync-products.yml:failing', message: 'products failed' }]
   assert.deepEqual(annotate(problems, alertKeys([])), ['::error::[monitor:sync-products.yml:failing] products failed'])
+})
+
+test('tolerates the schedule delays of GitHub Actions', () => {
+  const now = 100000000
+  const delayed = { status: 'completed', created_at: new Date(now - 40 * 60 * 1000).toISOString() }
+  delayed.updated_at = delayed.created_at
+  assert.equal(isStale([delayed], now), false)
+  assert.equal(hasStoppedCompleting([delayed], now), false)
+})
+
+const headers = values => ({ get: name => values[name] ?? null })
+
+test('retries transient GitHub API errors', async () => {
+  const responses = [
+    () => Promise.reject(new TypeError('fetch failed')),
+    () => ({ ok: false, status: 502, headers: headers({}) }),
+    () => ({ ok: false, status: 429, headers: headers({}) }),
+    () => ({ ok: false, status: 403, headers: headers({ 'x-ratelimit-remaining': '0' }) }),
+    () => ({ ok: true, json: () => Promise.reject(new TypeError('terminated')) }),
+    () => ({ ok: true, json: async () => 'body' }),
+  ]
+  const waits = []
+  const request = async () => (responses.shift() ?? (() => Promise.reject(new TypeError('fetch failed'))))()
+  assert.equal(await withRetries(request, [1, 2, 3, 4, 5], async ms => waits.push(ms), Infinity), 'body')
+  assert.deepEqual(waits, [1, 2, 3, 4, 5])
+  await assert.rejects(withRetries(request, [1], async () => {}, Infinity), TransientError)
+})
+
+test('gives up on transient errors at the run deadline', async () => {
+  const waits = []
+  const request = async () => ({ ok: false, status: 503, headers: headers({}) })
+  await assert.rejects(withRetries(request, [1000], async ms => waits.push(ms), Date.now()), TransientError)
+  assert.deepEqual(waits, [])
+})
+
+test('does not retry client errors', async () => {
+  let calls = 0
+  const request = async () => {
+    calls++
+    return { ok: false, status: 403, url: 'runs', headers: headers({}) }
+  }
+  await assert.rejects(withRetries(request, [1], async () => {}, Infinity), error => !(error instanceof TransientError))
+  assert.equal(calls, 1)
+})
+
+test('reads alerts from the last monitor run that checked the sync workflows', async () => {
+  const runs = [7, 6, 5, 4, 3, 2].map(id => ({ id, run_attempt: 1, status: 'completed' }))
+  runs[1].status = 'in_progress'
+  const jobs = {
+    5: [],
+    4: [{ id: 40, name: 'monitor', conclusion: 'success' }],
+    3: [{ id: 30, name: 'monitor', conclusion: 'failure' }],
+  }
+  const annotations = {
+    40: [{ message: '[monitor-skipped] GitHub API returned 502' }],
+    30: [{ message: '[monitor:sync-products.yml:failing] products failed' }],
+  }
+  const request = async path => {
+    if (path.startsWith('actions/workflows/')) return { workflow_runs: runs }
+    const jobsPath = path.match(/^actions\/runs\/(\d+)\//)
+    if (jobsPath) return { jobs: jobs[jobsPath[1]] }
+    return annotations[path.match(/^check-runs\/(\d+)\//)[1]]
+  }
+  assert.deepEqual([...(await reportedKeys(request, '7', 'main'))], ['sync-products.yml:failing'])
 })

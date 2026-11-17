@@ -8,20 +8,28 @@ export const parseFailureThreshold = value => {
   return Number(value)
 }
 export const failureThreshold = parseFailureThreshold(process.env.SYNC_FAILURE_THRESHOLD)
-export const staleAfterMs = 30 * 60 * 1000
+export const staleAfterMs = 2 * 60 * 60 * 1000
+export const retryDelaysMs = [5_000, 15_000, 30_000]
+export const requestTimeoutMs = 20_000
+export const runDeadline = Date.now() + 3 * 60 * 1000
 export const monitorWorkflow = 'monitor.yml'
 export const monitorJob = 'monitor'
 
 const alertTag = /\[monitor:([^\]]+)\]/
+export const skippedTag = '[monitor-skipped]'
+
+export class TransientError extends Error {}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 /**
  * Returns the problem of a sync workflow, or undefined when it is healthy.
  */
 export const checkWorkflow = async (workflow, runs, getJobs, now = Date.now(), threshold = failureThreshold) => {
   if (isStale(runs, now))
-    return { key: `${workflow}:stale`, message: `${workflow} has not started for at least 30 minutes` }
+    return { key: `${workflow}:stale`, message: `${workflow} has not started for at least 2 hours` }
   if (hasStoppedCompleting(runs, now))
-    return { key: `${workflow}:stopped`, message: `${workflow} has not completed for at least 30 minutes` }
+    return { key: `${workflow}:stopped`, message: `${workflow} has not completed for at least 2 hours` }
   const failures = await consecutiveFailures(runs, getJobs, threshold)
   console.log(`${workflow}: ${failures} consecutive unsuccessful runs`)
   if (failures < threshold) return
@@ -85,17 +93,42 @@ export const loadRunHistory = async (getPage, threshold = failureThreshold) => {
 const { GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_EVENT_NAME, GITHUB_EVENT_PATH, GITHUB_REF_NAME, GITHUB_RUN_ID } =
   process.env
 
-const api = async path => {
-  const response = await fetch(`https://api.github.com/repos/${GITHUB_REPOSITORY}/${path}`, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-    },
-  })
-  if (!response.ok) throw new Error(`GitHub API returned ${response.status} for ${path}`)
-  return response.json()
+/**
+ * Retries a request on network errors, rate limits, and server errors, then throws a TransientError.
+ */
+export const withRetries = async (request, delays = retryDelaysMs, wait = sleep, deadline = runDeadline) => {
+  for (let attempt = 0; ; attempt++) {
+    let failure
+    try {
+      const response = await request()
+      if (response.ok) return await response.json()
+      failure = `GitHub API returned ${response.status} for ${response.url}`
+      if (!isTransientStatus(response)) throw new Error(failure)
+    } catch (error) {
+      if (!(error instanceof TypeError) && !['TimeoutError', 'AbortError'].includes(error.name)) throw error
+      failure = `GitHub API is unreachable: ${error.message}`
+    }
+    if (attempt >= delays.length || Date.now() + delays[attempt] > deadline) throw new TransientError(failure)
+    await wait(delays[attempt])
+  }
 }
+
+const isTransientStatus = ({ status, headers }) =>
+  status === 429 ||
+  status >= 500 ||
+  (status === 403 && (headers?.get('retry-after') !== null || headers?.get('x-ratelimit-remaining') === '0'))
+
+const api = path =>
+  withRetries(() =>
+    fetch(`https://api.github.com/repos/${GITHUB_REPOSITORY}/${path}`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      signal: AbortSignal.timeout(requestTimeoutMs),
+    })
+  )
 
 const runsFor = workflow =>
   loadRunHistory(async page => {
@@ -112,17 +145,20 @@ const jobsFor = async (id, attempt) => {
 }
 
 /**
- * Finds the alert keys reported by the last monitor job that finished before this run.
+ * Finds the alert keys reported by the last monitor job that checked the sync workflows before this run.
  */
-const reportedKeys = async () => {
-  const { workflow_runs: runs } = await api(
-    `actions/workflows/${monitorWorkflow}/runs?per_page=20&branch=${encodeURIComponent(GITHUB_REF_NAME)}`
+export const reportedKeys = async (request = api, runId = GITHUB_RUN_ID, ref = GITHUB_REF_NAME) => {
+  const { workflow_runs: runs } = await request(
+    `actions/workflows/${monitorWorkflow}/runs?per_page=50&branch=${encodeURIComponent(ref)}`
   )
   for (const run of runs) {
-    if (String(run.id) === GITHUB_RUN_ID || run.status !== 'completed') continue
-    const job = (await jobsFor(run.id, run.run_attempt)).find(({ name }) => name === monitorJob)
+    if (String(run.id) === runId || run.status !== 'completed') continue
+    const { jobs } = await request(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`)
+    const job = jobs.find(({ name }) => name === monitorJob)
     if (!['success', 'failure'].includes(job?.conclusion)) continue
-    return alertKeys(await api(`check-runs/${job.id}/annotations?per_page=100`))
+    const annotations = await request(`check-runs/${job.id}/annotations?per_page=100`)
+    if (annotations.some(({ message }) => message?.includes(skippedTag))) continue
+    return alertKeys(annotations)
   }
   return new Set()
 }
@@ -133,7 +169,7 @@ const main = async () => {
 
   if (GITHUB_EVENT_NAME === 'workflow_run') {
     const { workflow_run: event } = JSON.parse(await readFile(GITHUB_EVENT_PATH, 'utf8'))
-    if (event.head_branch !== GITHUB_REF_NAME) return
+    if (event.head_branch !== GITHUB_REF_NAME) return console.log(`::notice::${skippedTag} run on another branch`)
   }
 
   const problems = []
@@ -142,14 +178,23 @@ const main = async () => {
     if (problem) problems.push(problem)
   }
 
-  const reported = await reportedKeys()
+  if (!problems.length) return
+  const reported = await reportedKeys().catch(error => {
+    if (!(error instanceof TransientError)) throw error
+    console.log(`::warning::Cannot read previous alerts, so ongoing problems may alert again: ${error.message}`)
+    return new Set()
+  })
   for (const line of annotate(problems, reported)) console.log(line)
   if (problems.some(({ key }) => !reported.has(key))) process.exitCode = 1
 }
 
 if (process.argv[1]?.endsWith('monitor.mjs')) {
   main().catch(error => {
-    console.error(error)
-    process.exitCode = 1
+    if (!(error instanceof TransientError)) {
+      console.error(error)
+      process.exitCode = 1
+      return
+    }
+    console.log(`::warning::${skippedTag} ${error.message}; the next run checks again`)
   })
 }
